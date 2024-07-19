@@ -1,6 +1,6 @@
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -10,32 +10,44 @@ import pylightxl as xl
 import Case_Skins as cls
 import save_to_db as save
 
-
 def search_skin(Cases, driver, displayVar, window):
     for case in Cases:
         for skin in case.Skins:
 
-            # initializez toate preturile skinului cu -1
-            for i in range(0, 11):
-                skin.prices.append(-1)
+            print(f"Searching prices for: {skin.weapon} | {skin.name}")
 
-            input_element = driver.find_element_by_id('searchInput')
-            input_element.clear()
-            input_element.send_keys(skin.weapon + ' ' + skin.name)
-            input_element.send_keys(Keys.ENTER)
+            # Initialize all skin prices with -1
+            skin.prices = [-1] * 11  # More efficient initialization
 
-            # Astept sa se incarce pagina (adica sa apara numele skin-ului in prima caseta din tabel)
-            WebDriverWait(driver, 120).until(EC.text_to_be_present_in_element((By.XPATH, '/html/body/div[22]/div/div/div[4]/div/div/div[2]/div/table/tbody/tr[1]'), skin.name))
+            try:
+                input_element = driver.find_element(By.ID, 'searchInput')
+                input_element.clear()
+                input_element.send_keys(skin.weapon + ' ' + skin.name)
+                input_element.send_keys(Keys.ENTER)
+            except NoSuchElementException as e:
+                print(f"Search input element not found: {e}")
+                continue
 
-            # fac media preturilor de pe site-uri si o adaug lui skin, la calitatea care trebuie
+            print(f"Waiting for page to load for skin: {skin.name}")
+            print(f"Current URL after search: {driver.current_url}")  # Print the current URL after search
+
+            try:
+                # Wait for the page to load (wait until the skin name appears in the first box of the table)
+                WebDriverWait(driver, 60).until(EC.text_to_be_present_in_element((By.XPATH, '//table/tbody/tr[1]'), skin.name))
+                print(f"Page loaded for skin: {skin.name}")
+            except TimeoutException:
+                print(f"Timeout while waiting for page to load for skin: {skin.name}")
+                print("Page source at timeout:")
+                print(driver.page_source)  # Print page source to understand the issue
+                continue  # Skip to the next skin
+
+            # Calculate the average prices from the sites and add to the skin at the required quality
             for i in range(1, 11):
                 try:
-                    table_row = driver.find_element_by_xpath(
-                        '/html/body/div[22]/div/div/div[4]/div/div/div[2]/div/table/tbody/tr[' + str(
-                            i) + ']').text
+                    table_row = driver.find_element(By.XPATH, f'//table/tbody/tr[{i}]').text
                     data = table_row.split(' ')
 
-                    # numar cate caractere sar pentru a ajunge la preturi
+                    # Count how many characters to skip to reach the prices
                     count = 0
                     for index, elem in enumerate(data):
                         if '(' in elem:
@@ -49,7 +61,7 @@ def search_skin(Cases, driver, displayVar, window):
                     if 'stattrak' in data[0].lower():
                         plus1 += 1
 
-                    # adaug pretul la CALITATEA care trebuie
+                    # Add the price to the required QUALITY
                     if '(FN)' in table_row:
                         skin.prices[plus1 * 5 + 0] = data[count]
                     if '(MW)' in table_row:
@@ -61,13 +73,15 @@ def search_skin(Cases, driver, displayVar, window):
                     if '(BS)' in table_row:
                         skin.prices[plus1 * 5 + 4] = data[count]
 
-                    print_to_log(skin.weapon + ' | ' + skin.name + ' sells for ' + data[count] + '$ on average.', displayVar, window)
+                    print_to_log(f"{skin.weapon} | {skin.name} sells for {data[count]}$ on average.", displayVar, window)
 
                 except NoSuchElementException:
-                    print(skin.name + ' nu se gaseste pe atatea calitati.')
+                    print(f"{skin.name} not found in all qualities.")
+                except Exception as e:
+                    print(f"Unexpected error occurred while processing skin: {skin.weapon} | {skin.name}. Error: {e}")
 
 
-# va fi apelata pentru fiecare cutie
+# Will be called for each case
 def read_xl(db, sheet_name, Cases):
     [roww, coll] = db.ws(sheet_name).size
     data = db.ws(sheet_name).range('A2:N' + str(roww))
@@ -83,6 +97,7 @@ def print_to_log(text, text_Var, window):
     window.update()
 
 def extract_prices(input_file, output_file, displayVar, window):
+    print("Extracting prices...")
     Cases = []
     db = xl.readxl(input_file)
     sheet_names = db.ws_names
@@ -93,9 +108,10 @@ def extract_prices(input_file, output_file, displayVar, window):
         read_xl(db, sheet, ObjCase)
         Cases.append(ObjCase)
 
+    print(f"Found {len(Cases)} cases.")
 
-    # adaug niste setari care sa faca Chrome-ul sa nu se mai deschida in forma de testare (asa cum deschide Selenium)
-    # pentru ca fara asta nu as putea trece de verificarea Cloudflare
+    # Adding some settings to make Chrome not open in test mode (as Selenium opens it)
+    # because without this I wouldn't be able to pass Cloudflare verification
     options = webdriver.ChromeOptions()
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
@@ -104,13 +120,13 @@ def extract_prices(input_file, output_file, displayVar, window):
 
     driver.get('https://csgo.steamanalyst.com/markets')
 
-    # Am nevoie de 13 secunde sa creez un nou tab de chrome in care sa deschid acelasi link
-    # Pe acel nou tab voi trece de verificarea Cloudflare, si dupa se va incarca pagina si pe tabul de lucru
-    # iar programul poate rula fara probleme
+    # I need 13 seconds to create a new Chrome tab to open the same link
+    # In this new tab, I will pass Cloudflare verification, and then the page will load on the working tab
+    # and the program can run without issues
     time.sleep(13)
 
-    # minimizez fereastra, si o pozitionez intr-un loc inaccesibil
-    # astfel, daca utilizatorul nu inchide fereastra, nu poate afecta procesul de cautare
+    # Minimize the window and position it in an inaccessible location
+    # this way, if the user does not close the window, they cannot affect the search process
     driver.minimize_window()
     driver.set_window_position(-10000, -10000, windowHandle='current')
 
